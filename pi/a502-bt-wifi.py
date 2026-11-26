@@ -160,6 +160,53 @@ MENU = """
 Type a number and press Enter."""
 
 
+def handle_request(req, send):
+    """One JSON request -> JSON answers via send(dict). Shared by the serial port and BLE.
+    Returns "quit" when the client asked to stop."""
+    cmd, rid = req.get("cmd"), req.get("id")
+    def reply(**kw): send(dict(id=rid, **kw))
+    if cmd == "status":
+        reply(ok=True, status=status_data())
+    elif cmd == "list":
+        reply(ok=True, saved=[{k: n[k] for k in ("uuid", "ssid", "prio", "active", "pw")} for n in wifi_list()])
+    elif cmd == "scan":
+        reply(ok=True, visible=scan_data())
+    elif cmd == "password":
+        reply(ok=True, password=password_of(str(req.get("uuid", ""))))
+    elif cmd == "delete":
+        rc, o, err = sh([WIFI, "delete", str(req.get("uuid", ""))])
+        reply(ok=rc == 0, error=err.replace("error: ", "") or None)
+    elif cmd in ("add", "connect"):
+        uuid = str(req.get("uuid", ""))
+        if cmd == "add":
+            rc, out, err = sh([WIFI, "add"], inp=str(req.get("ssid", "")) + "\n" + str(req.get("password", "")) + "\n")
+            if rc:
+                return reply(ok=False, error=err.replace("error: ", ""))
+            uuid = out.strip()
+            if not req.get("connect"):
+                return reply(ok=True, done=True, message=f"Saved {req.get('ssid')}.")
+        rc, o, err = sh([WIFI, "connect", uuid])
+        if rc:
+            return reply(ok=False, error=err.replace("error: ", ""))
+        seen, t0, last = "", time.time(), {}
+        while time.time() - t0 < 180:            # stream each step of the switch
+            try:
+                last = json.load(open(RESULT))
+            except (OSError, ValueError):
+                last = {}
+            msg = last.get("message", "")
+            if msg and msg != seen:
+                reply(ok=True, progress=msg); seen = msg
+            if last.get("state") in ("ok", "failed") and time.time() - t0 > 2:
+                break
+            time.sleep(1)
+        reply(ok=last.get("state") == "ok", done=True, message=seen, status=status_data())
+    elif cmd == "quit":
+        return "quit"
+    else:
+        reply(ok=False, error="unknown command")
+
+
 class Session:
     def __init__(self, s, dev):
         self.s, self.dev, self.buf = s, dev, b""
@@ -218,48 +265,8 @@ class Session:
                 req = json.loads(line)
             except ValueError:
                 self.jout({"ok": False, "error": "bad request"}); continue
-            cmd, rid = req.get("cmd"), req.get("id")
-            def reply(**kw): self.jout(dict(id=rid, **kw))
-            if cmd == "status":
-                reply(ok=True, status=status_data())
-            elif cmd == "list":
-                reply(ok=True, saved=[{k: n[k] for k in ("uuid", "ssid", "prio", "active", "pw")} for n in wifi_list()])
-            elif cmd == "scan":
-                reply(ok=True, visible=scan_data())
-            elif cmd == "password":
-                reply(ok=True, password=password_of(str(req.get("uuid", ""))))
-            elif cmd == "delete":
-                rc, o, err = sh([WIFI, "delete", str(req.get("uuid", ""))])
-                reply(ok=rc == 0, error=err.replace("error: ", "") or None)
-            elif cmd in ("add", "connect"):
-                uuid = str(req.get("uuid", ""))
-                if cmd == "add":
-                    rc, out, err = sh([WIFI, "add"], inp=str(req.get("ssid", "")) + "\n" + str(req.get("password", "")) + "\n")
-                    if rc:
-                        reply(ok=False, error=err.replace("error: ", "")); continue
-                    uuid = out.strip()
-                    if not req.get("connect"):
-                        reply(ok=True, done=True, message=f"Saved {req.get('ssid')}."); continue
-                rc, o, err = sh([WIFI, "connect", uuid])
-                if rc:
-                    reply(ok=False, error=err.replace("error: ", "")); continue
-                seen, t0, last = "", time.time(), {}
-                while time.time() - t0 < 180:            # stream each step of the switch
-                    try:
-                        last = json.load(open(RESULT))
-                    except (OSError, ValueError):
-                        last = {}
-                    msg = last.get("message", "")
-                    if msg and msg != seen:
-                        reply(ok=True, progress=msg); seen = msg
-                    if last.get("state") in ("ok", "failed") and time.time() - t0 > 2:
-                        break
-                    time.sleep(1)
-                reply(ok=last.get("state") == "ok", done=True, message=seen, status=status_data())
-            elif cmd == "quit":
+            if handle_request(req, self.jout) == "quit":
                 return
-            else:
-                reply(ok=False, error="unknown command")
 
     def run(self):
         try:
@@ -353,7 +360,10 @@ def keep_visible(bus, agent_mgr):
 
 
 def on_props(iface, changed, invalidated, path=None):
-    """Trust every device right after it paired, so it can reconnect without questions."""
+    """Trust every device right after it paired, so it can reconnect without questions.
+    Forget a device's BLE PIN login when it disconnects."""
+    if iface == "org.bluez.Device1" and "Connected" in changed and not changed["Connected"]:
+        ble_auth.discard(str(path)); ble_buf.pop(str(path), None)
     if iface == "org.bluez.Device1" and changed.get("Paired"):
         try:
             p = dbus.Interface(dbus.SystemBus().get_object(BUS, path), "org.freedesktop.DBus.Properties")
@@ -363,7 +373,151 @@ def on_props(iface, changed, invalidated, path=None):
             log("trust:", e)
 
 
+# ---------------- BLE (for the web page: browsers only speak Bluetooth Low Energy) ----------------
+# One GATT service with two characteristics, carrying the same JSON lines as the serial JSON mode:
+#   RX  (browser writes, encrypted link required)  -> requests, '\n'-terminated, may arrive in pieces
+#   TX  (notify)                                    -> answers, '\n'-terminated, sent in MTU-size pieces
+# A device must send {"cmd":"auth","pin":"..."} first; until then every other command is refused.
+BLE_SVC = "6e0b1a50-a502-4b7e-9c1f-a502b1e00001"
+BLE_RX = "6e0b1a50-a502-4b7e-9c1f-a502b1e00002"
+BLE_TX = "6e0b1a50-a502-4b7e-9c1f-a502b1e00003"
+GATT_CHRC = "org.bluez.GattCharacteristic1"
+# BT_BLE_ENCRYPT=1: browsers must pair (encrypted link) before writing - protects the Wi-Fi password over the
+# air, but every visitor's device has to complete Bluetooth pairing. 0: the PIN alone guards access.
+BLE_ENCRYPT = os.environ.get("BT_BLE_ENCRYPT", "0") == "1"
+ble_auth, ble_buf, ble_mtu, ble_fails = set(), {}, {}, {}
+
+
+class GattObj(dbus.service.Object):
+    def __init__(self, bus, path, iface, props):
+        self.path, self.iface, self._props = path, iface, props
+        super().__init__(bus, path)
+
+    def managed(self):
+        return {self.iface: self._props}
+
+    @dbus.service.method("org.freedesktop.DBus.Properties", in_signature="s", out_signature="a{sv}")
+    def GetAll(self, iface):
+        return self._props if iface == self.iface else {}
+
+    @dbus.service.method("org.freedesktop.DBus.Properties", in_signature="ss", out_signature="v")
+    def Get(self, iface, name):
+        return self._props[name]
+
+    @dbus.service.signal("org.freedesktop.DBus.Properties", signature="sa{sv}as")
+    def PropertiesChanged(self, iface, changed, invalidated):
+        pass
+
+
+class TxChar(GattObj):
+    def __init__(self, bus, path, svc):
+        super().__init__(bus, path, GATT_CHRC, {"UUID": BLE_TX, "Service": dbus.ObjectPath(svc),
+                                                "Flags": dbus.Array(["notify"], signature="s"),
+                                                "Descriptors": dbus.Array([], signature="o")})
+        self.notifying = False
+
+    @dbus.service.method(GATT_CHRC, in_signature="", out_signature="")
+    def StartNotify(self):
+        self.notifying = True
+
+    @dbus.service.method(GATT_CHRC, in_signature="", out_signature="")
+    def StopNotify(self):
+        self.notifying = False
+
+    def send(self, dev, obj):
+        """Called from worker threads: hand each piece to the main loop, in order."""
+        data = (json.dumps(obj) + "\n").encode()
+        n = max(20, ble_mtu.get(dev, 23) - 3)
+        for i in range(0, len(data), n):
+            GLib.idle_add(self._emit, data[i:i + n])
+
+    def _emit(self, chunk):
+        if self.notifying:
+            self.PropertiesChanged(GATT_CHRC, {"Value": dbus.Array(chunk, signature="y")}, [])
+        return False
+
+
+class RxChar(GattObj):
+    def __init__(self, bus, path, svc, tx):
+        super().__init__(bus, path, GATT_CHRC, {"UUID": BLE_RX, "Service": dbus.ObjectPath(svc),
+                                                "Flags": dbus.Array(["encrypt-write" if BLE_ENCRYPT else "write"], signature="s"),
+                                                "Descriptors": dbus.Array([], signature="o")})
+        self.tx = tx
+
+    @dbus.service.method(GATT_CHRC, in_signature="aya{sv}", out_signature="")
+    def WriteValue(self, value, options):
+        dev = str(options.get("device", "?"))
+        if "mtu" in options:
+            ble_mtu[dev] = int(options["mtu"])
+        buf = ble_buf.get(dev, b"") + bytes(value)
+        if len(buf) > 8192:
+            buf = b""                                   # garbage / too long: drop it
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            if line.strip():
+                threading.Thread(target=self.handle, args=(dev, line.decode(errors="replace")), daemon=True).start()
+        ble_buf[dev] = buf
+
+    def handle(self, dev, line):
+        send = lambda obj: self.tx.send(dev, obj)
+        try:
+            req = json.loads(line)
+        except ValueError:
+            return send({"ok": False, "error": "bad request"})
+        if req.get("cmd") == "auth":
+            if str(req.get("pin", "")) == PIN:
+                ble_auth.add(dev); ble_fails.pop(dev, None)
+                log("BLE: PIN ok from", dev)
+                return send({"id": req.get("id"), "ok": True, "hello": ALIAS})
+            ble_fails[dev] = ble_fails.get(dev, 0) + 1
+            time.sleep(min(2 * ble_fails[dev], 10))         # slow down guessing
+            log("BLE: wrong PIN from", dev)
+            return send({"id": req.get("id"), "ok": False, "error": "wrong PIN"})
+        if dev not in ble_auth:
+            return send({"id": req.get("id"), "ok": False, "error": "send the PIN first"})
+        handle_request(req, send)
+
+
+class BleApp(dbus.service.Object):
+    def __init__(self, bus):
+        self.path = "/a502/gatt"
+        super().__init__(bus, self.path)
+        self.svc = GattObj(bus, self.path + "/s0", "org.bluez.GattService1", {})
+        self.tx = TxChar(bus, self.svc.path + "/tx", self.svc.path)
+        self.rx = RxChar(bus, self.svc.path + "/rx", self.svc.path, self.tx)
+        self.svc._props.update({"UUID": BLE_SVC, "Primary": True,
+                                "Characteristics": dbus.Array([self.rx.path, self.tx.path], signature="o")})
+
+    @dbus.service.method("org.freedesktop.DBus.ObjectManager", out_signature="a{oa{sa{sv}}}")
+    def GetManagedObjects(self):
+        return {o.path: o.managed() for o in (self.svc, self.rx, self.tx)}
+
+
+class BleAdvert(GattObj):
+    def __init__(self, bus):
+        super().__init__(bus, "/a502/adv", "org.bluez.LEAdvertisement1", {
+            "Type": "peripheral", "ServiceUUIDs": dbus.Array([BLE_SVC], signature="s"),
+            "LocalName": ALIAS, "Discoverable": True})
+
+    @dbus.service.method("org.bluez.LEAdvertisement1", in_signature="", out_signature="")
+    def Release(self):
+        pass
+
+
+def ble_start(bus):
+    app, adv = BleApp(bus), BleAdvert(bus)
+    adapter = bus.get_object(BUS, "/org/bluez/hci0")
+    ok = lambda what: (lambda *a: log("BLE:", what, "registered"))
+    bad = lambda what: (lambda e: log("BLE:", what, "failed:", e))
+    dbus.Interface(adapter, "org.bluez.GattManager1").RegisterApplication(
+        app.path, {}, reply_handler=ok("service"), error_handler=bad("service"))
+    dbus.Interface(adapter, "org.bluez.LEAdvertisingManager1").RegisterAdvertisement(
+        adv.path, {}, reply_handler=ok("advertising"), error_handler=bad("advertising"))
+    return app, adv
+
+
 if __name__ == "__main__":
+    dbus.mainloop.glib.threads_init()                      # BLE answers come from worker threads
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
     adapter_setup(bus)
@@ -379,5 +533,6 @@ if __name__ == "__main__":
     bus.add_signal_receiver(on_props, dbus_interface="org.freedesktop.DBus.Properties",
                             signal_name="PropertiesChanged", path_keyword="path")
     GLib.timeout_add_seconds(60, keep_visible, bus, agent_mgr)
+    ble = ble_start(bus)                                    # keep references alive
     log(f"Bluetooth Wi-Fi rescue ready: name {ALIAS}, PIN {PIN}, serial channel {CHANNEL}")
     GLib.MainLoop().run()

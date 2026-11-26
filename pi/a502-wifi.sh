@@ -75,16 +75,17 @@ add)
   [ -z "$U" ] && U=$FIRST
   if [ -n "$U" ]; then           # already saved -> update it (password stored for the system, psk-flags 0)
     nmcli con modify uuid "$U" connection.id "$SSID" 2>/dev/null   # tidy name (e.g. "Iphone 1" -> "Iphone")
+    nmcli con modify uuid "$U" ipv4.may-fail no 2>/dev/null       # no IPv4 address = failed -> try the next network
     if [ -n "$PW" ]; then nmcli con modify uuid "$U" wifi-sec.key-mgmt $KM wifi-sec.psk "$PW" wifi-sec.psk-flags 0 connection.autoconnect yes || die "could not update"
     else nmcli con modify uuid "$U" remove 802-11-wireless-security connection.autoconnect yes 2>/dev/null || true; fi
     logger -t a502-wifi "updated saved network $SSID ($KM)"
   else
     if [ -n "$PW" ]; then
       nmcli con add type wifi ifname "$IF" con-name "$SSID" ssid "$SSID" connection.autoconnect yes \
-        connection.autoconnect-priority 5 802-11-wireless.powersave 2 wifi-sec.key-mgmt $KM wifi-sec.psk "$PW" wifi-sec.psk-flags 0 >/dev/null || die "could not save"
+        connection.autoconnect-priority 5 802-11-wireless.powersave 2 ipv4.may-fail no wifi-sec.key-mgmt $KM wifi-sec.psk "$PW" wifi-sec.psk-flags 0 >/dev/null || die "could not save"
     else
       nmcli con add type wifi ifname "$IF" con-name "$SSID" ssid "$SSID" connection.autoconnect yes \
-        connection.autoconnect-priority 5 802-11-wireless.powersave 2 >/dev/null || die "could not save"
+        connection.autoconnect-priority 5 802-11-wireless.powersave 2 ipv4.may-fail no >/dev/null || die "could not save"
     fi
     for u in $(wifi_uuids); do [ "$(ssid_of "$u")" = "$SSID" ] && U=$u; done
     logger -t a502-wifi "saved new network $SSID ($KM)"

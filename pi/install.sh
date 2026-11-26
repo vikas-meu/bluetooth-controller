@@ -20,6 +20,8 @@ StartLimitIntervalSec=0
 [Service]
 Environment=BT_PIN=12345678
 Environment=BT_NAME=a502-wifi
+# 1 = browsers must pair (encrypted link) before writing; 0 = the PIN alone guards access (works everywhere)
+Environment=BT_BLE_ENCRYPT=0
 ExecStartPre=/usr/sbin/rfkill unblock bluetooth
 ExecStart=/usr/local/sbin/a502-bt-wifi
 Restart=always
