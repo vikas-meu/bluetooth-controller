@@ -415,6 +415,7 @@ class TxChar(GattObj):
                                                 "Flags": dbus.Array(["notify"], signature="s"),
                                                 "Descriptors": dbus.Array([], signature="o")})
         self.notifying = False
+        self.lock = threading.Lock()
 
     @dbus.service.method(GATT_CHRC, in_signature="", out_signature="")
     def StartNotify(self):
@@ -427,9 +428,11 @@ class TxChar(GattObj):
     def send(self, dev, obj):
         """Called from worker threads: hand each piece to the main loop, in order."""
         data = (json.dumps(obj) + "\n").encode()
-        n = max(20, ble_mtu.get(dev, 23) - 3)
-        for i in range(0, len(data), n):
-            GLib.idle_add(self._emit, data[i:i + n])
+        n = min(500, max(20, ble_mtu.get(dev, 23) - 3))   # a Bluetooth value is at most 512 bytes
+        with self.lock:                                   # one answer at a time, pieces in order
+            for i in range(0, len(data), n):
+                GLib.idle_add(self._emit, data[i:i + n])
+                time.sleep(0.015)                         # pace the pieces: a burst makes Bluetooth drop some
 
     def _emit(self, chunk):
         if self.notifying:

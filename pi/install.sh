@@ -8,11 +8,21 @@ command -v nmcli >/dev/null || { echo "NetworkManager (nmcli) is required."; exi
 python3 -c "import dbus, gi" 2>/dev/null || sudo apt-get install -y python3-dbus python3-gi
 sudo rfkill unblock bluetooth 2>/dev/null || true
 sudo systemctl enable --now bluetooth
-# BLE under its own private address, so devices already paired over classic Bluetooth still reach the BLE side
-if ! grep -q "^Privacy = device" /etc/bluetooth/main.conf; then
-  sudo cp -a /etc/bluetooth/main.conf /etc/bluetooth/main.conf.bak
-  sudo sed -i 's/^\[General\]$/[General]\nPrivacy = device/' /etc/bluetooth/main.conf
-  sudo systemctl restart bluetooth
+# Bluetooth settings that let browsers (BLE) connect reliably:
+#  - Privacy: BLE uses its own private address, so devices paired over classic Bluetooth still reach BLE
+#  - DeviceID: a real PnP ID, so a device reading it gets no error
+#  - [GATT] Channels = 1: no Enhanced ATT, which gives "unlikely error" with other Linux (BlueZ) machines
+F=/etc/bluetooth/main.conf
+sudo cp -a $F $F.bak-$(date +%Y%m%d-%H%M%S)
+grep -q "^Privacy = device" $F || sudo sed -i 's/^\[General\]$/[General]\nPrivacy = device/' $F
+grep -q "^DeviceID" $F         || sudo sed -i 's/^Privacy = device$/Privacy = device\nDeviceID = usb:1D6B:0246:0542/' $F
+grep -q "^Channels = 1" $F     || sudo sed -i 's/^\[GATT\]$/[GATT]\nChannels = 1/' $F
+sudo systemctl restart bluetooth
+# the Pi does not need Bluetooth audio; its connection attempts crowd out the BLE link
+if command -v wireplumber >/dev/null; then
+  mkdir -p ~/.config/wireplumber/bluetooth.lua.d
+  echo "bluez_monitor.enabled = false" > ~/.config/wireplumber/bluetooth.lua.d/90-no-bt-audio.lua
+  systemctl --user restart wireplumber 2>/dev/null || true
 fi
 sudo mkdir -p /var/lib/a502
 sudo install -m 755 -o root -g root "$DIR/a502-wifi.sh"   /usr/local/sbin/a502-wifi
