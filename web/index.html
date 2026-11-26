@@ -82,7 +82,7 @@ a{color:var(--accent)}
       <button id="connectBtn" class="primary">Connect to the Pi</button>
       <button id="disconnectBtn" class="hidden">Disconnect</button>
     </div>
-    <p class="muted" style="margin:10px 0 0;font-size:13px">Stay within about 10 m of the Pi. Your browser shows a list — pick <b>a502-wifi</b>.
+    <p class="muted" style="margin:10px 0 0;font-size:13px">Stay within about 10 m of the Pi. Your browser shows a list — pick <b>a502wifi</b>.
       If your computer asks to pair, accept it.</p>
   </section>
 
@@ -188,7 +188,7 @@ async function connect(){
   $('connectBtn').disabled = true;
   try {
     state('choose the Pi…', 'warn');
-    device = await navigator.bluetooth.requestDevice({filters: [{services: [SVC]}, {namePrefix: 'a502'}], optionalServices: [SVC]});
+    device = await navigator.bluetooth.requestDevice({filters: [{services: [SVC]}]});   // only the Pi's BLE side (named a502wifi)
     device.addEventListener('gattserverdisconnected', onDisconnected);
     state('connecting…', 'warn'); log(`Connecting to ${device.name || 'the Pi'}…`);
     const server = await device.gatt.connect();

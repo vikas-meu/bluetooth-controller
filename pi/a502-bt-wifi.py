@@ -497,7 +497,8 @@ class BleAdvert(GattObj):
     def __init__(self, bus):
         super().__init__(bus, "/a502/adv", "org.bluez.LEAdvertisement1", {
             "Type": "peripheral", "ServiceUUIDs": dbus.Array([BLE_SVC], signature="s"),
-            "LocalName": ALIAS, "Discoverable": True})
+            # an advertisement holds 31 bytes: flags (3) + the 128-bit service id (18) leave 10 -> name max 8 chars
+            "LocalName": os.environ.get("BT_BLE_NAME", "a502wifi")[:8], "Discoverable": True})
 
     @dbus.service.method("org.bluez.LEAdvertisement1", in_signature="", out_signature="")
     def Release(self):

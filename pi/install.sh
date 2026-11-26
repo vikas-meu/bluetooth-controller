@@ -8,6 +8,12 @@ command -v nmcli >/dev/null || { echo "NetworkManager (nmcli) is required."; exi
 python3 -c "import dbus, gi" 2>/dev/null || sudo apt-get install -y python3-dbus python3-gi
 sudo rfkill unblock bluetooth 2>/dev/null || true
 sudo systemctl enable --now bluetooth
+# BLE under its own private address, so devices already paired over classic Bluetooth still reach the BLE side
+if ! grep -q "^Privacy = device" /etc/bluetooth/main.conf; then
+  sudo cp -a /etc/bluetooth/main.conf /etc/bluetooth/main.conf.bak
+  sudo sed -i 's/^\[General\]$/[General]\nPrivacy = device/' /etc/bluetooth/main.conf
+  sudo systemctl restart bluetooth
+fi
 sudo mkdir -p /var/lib/a502
 sudo install -m 755 -o root -g root "$DIR/a502-wifi.sh"   /usr/local/sbin/a502-wifi
 sudo install -m 755 -o root -g root "$DIR/a502-bt-wifi.py" /usr/local/sbin/a502-bt-wifi

@@ -3,7 +3,7 @@
 See and change a Raspberry Pi's Wi-Fi **over Bluetooth** — no SSH, no screen, no network needed.
 
 **Easiest: the web page.** Open **https://vikas-meu.github.io/bluetooth-controller/web/** in Chrome or Edge,
-type the Pi's PIN, press *Connect to the Pi* and pick **a502-wifi**. Nothing to install.
+type the Pi's PIN, press *Connect to the Pi* and pick **a502wifi**. Nothing to install.
 Useful when the Pi is on a Wi-Fi you can't reach: pair over Bluetooth and you get the Pi's current
 network, its password and IP, and you can scan, add, connect to or forget networks. If a new network
 fails (wrong password, no internet), the Pi goes back to the previous one by itself.
